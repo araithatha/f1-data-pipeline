@@ -1,0 +1,29 @@
+{
+  "built_at_utc": "2026-10-30T07:31:25Z",
+  "history_seasons": [
+    2014,
+    2026
+  ],
+  "timing_seasons": [
+    2023,
+    2026
+  ],
+  "row_counts": {
+    "dim_race": 270,
+    "dim_driver": 63,
+    "dim_constructor": 22,
+    "fact_result": 5501,
+    "fact_qualifying": 5480,
+    "fact_lap": 97230,
+    "fact_pit_stop": 3064
+  },
+  "api_calls": {
+    "jolpica": 0,
+    "openf1": 0
+  },
+  "cache_hits": {
+    "jolpica": 135,
+    "openf1": 444
+  },
+  "runtime_s": 3.0
+}

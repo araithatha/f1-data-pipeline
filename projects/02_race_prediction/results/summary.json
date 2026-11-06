@@ -146,9 +146,78 @@
       "grid_system_log_loss": 0.2904429854642851
     }
   },
+  "regulation_changes": {
+    "adopted": false,
+    "2022_validation": {
+      "first_5_races_after_reset": {
+        "races": 5,
+        "spearman_core": 0.7816579344288322,
+        "spearman_with_regulation_features": 0.7695272683972374,
+        "spearman_grid": 0.7775498701504893,
+        "system_log_loss_core": 0.30796041695389653,
+        "system_log_loss_with_regulation_features": 0.3099287754954136,
+        "dnf_predicted_selected_model": 0.16588326606689843,
+        "dnf_predicted_with_season_rates": 0.23692560888852504,
+        "dnf_actual": 0.1919191919191919
+      },
+      "rest_of_season": {
+        "races": 17,
+        "spearman_core": 0.8349806509886641,
+        "spearman_with_regulation_features": 0.8376722015312437,
+        "spearman_grid": 0.7336429141792464,
+        "system_log_loss_core": 0.26342251256148513,
+        "system_log_loss_with_regulation_features": 0.26263890137069185,
+        "dnf_predicted_selected_model": 0.1424710185319793,
+        "dnf_predicted_with_season_rates": 0.19196113610228518,
+        "dnf_actual": 0.1588235294117647
+      }
+    },
+    "2026_test": {
+      "first_5_races_after_reset": {
+        "races": 5,
+        "spearman_core": 0.8448702638950317,
+        "spearman_with_regulation_features": 0.8387358101135189,
+        "spearman_grid": 0.8562044817927171,
+        "system_log_loss_core": 0.2519290235074289,
+        "system_log_loss_with_regulation_features": 0.2494502826412913,
+        "dnf_predicted_selected_model": 0.14812852527619982,
+        "dnf_predicted_with_season_rates": 0.16410445135381022,
+        "dnf_actual": 0.1650485436893204
+      },
+      "rest_of_season": {
+        "races": 14,
+        "spearman_core": 0.8436442998251931,
+        "spearman_with_regulation_features": 0.8450227459404813,
+        "spearman_grid": 0.7913699690402475,
+        "system_log_loss_core": 0.23881027773062471,
+        "system_log_loss_with_regulation_features": 0.23777645585276588,
+        "dnf_predicted_selected_model": 0.15843523285703037,
+        "dnf_predicted_with_season_rates": 0.15001819386452311,
+        "dnf_actual": 0.2012987012987013
+      }
+    },
+    "overall_validation": {
+      "spearman_core": 0.8299549916887377,
+      "spearman_with_regulation_features": 0.8282571098205774,
+      "system_log_loss_core": 0.2533533099772713,
+      "system_log_loss_with_regulation_features": 0.25359194567078985
+    },
+    "overall_test": {
+      "spearman_core": 0.8178394462954187,
+      "spearman_with_regulation_features": 0.8156070619566911,
+      "system_log_loss_core": 0.2470396403254724,
+      "system_log_loss_with_regulation_features": 0.2466050039514065,
+      "bootstrap_logloss_regulation_vs_core": {
+        "mean": -0.0004112628994680976,
+        "ci95_low": -0.001178991390140169,
+        "ci95_high": 0.0003918410880710048,
+        "share_of_races_better": 0.5581395348837209
+      }
+    }
+  },
   "dnf_test": {
     "mean_predicted": 0.13520492211430984,
     "actual_rate": 0.14656144306651633
   },
-  "runtime_s": 355.3
+  "runtime_s": 367.2
 }

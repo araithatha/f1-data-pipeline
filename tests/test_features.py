@@ -32,12 +32,14 @@ def _build(tables: dict) -> pd.DataFrame:
     df = F.add_weekend_features(df, tables)
     df = F.add_driver_form(df)
     df = F.add_team_form(df, tables)
+    df = F.add_reliability_trend(df)
     df = F.add_circuit_history(df)
+    df = F.add_regulation_interactions(df)
     return df
 
 
 @needs_data
-@pytest.mark.parametrize("cutoff", [201810, 202312, 202505])
+@pytest.mark.parametrize("cutoff", [201810, 202203, 202312, 202505, 202602])
 def test_no_future_information_leaks(cutoff):
     tables = F.load_tables(PROCESSED)
     full = _build(tables).set_index(["race_id", "driver_id"])

@@ -39,6 +39,9 @@ DNF_FEATURES = [
     "team_dnf_rate_10", "drv_dnf_rate_20", "circ_dnf_rate_hist", "grid_pct", "pit_lane_start",
     "wx_wet_race", "wx_precip_mm", "new_regs_season", "round", "drv_starts", "team_avg_finish_pct_5",
 ]
+# Candidate add-on: this season's retirement rates, which react within a few races when new rules
+# change reliability (2026: 19% of starts vs 11% in 2025). Compared like any other DNF model.
+DNF_FEATURES_WITH_SEASON_RATES = DNF_FEATURES + ["team_dnf_rate_season", "field_dnf_rate_season", "races_into_era"]
 EPS = 1e-6
 
 
@@ -66,26 +69,28 @@ def _lgbm_clf():
                               subsample_freq=1, colsample_bytree=0.8, random_state=SEED, verbose=-1)
 
 
-# (model factory, training window in seasons; None = all earlier seasons).
+# (model factory, training window in seasons or None for all earlier seasons, feature list or None for default).
 # Cars have become far more reliable since the mid-2010s, so a recent window may track today's rates better.
 DNF_CANDIDATES = {
-    "Base rate (baseline)": (BaseRate, None),
-    "Base rate, last 3 seasons": (BaseRate, 3),
-    "Logistic regression": (_logit, None),
-    "Logistic regression, last 4 seasons": (_logit, 4),
-    "LightGBM classifier": (_lgbm_clf, None),
+    "Base rate (baseline)": (BaseRate, None, None),
+    "Base rate, last 3 seasons": (BaseRate, 3, None),
+    "Logistic regression": (_logit, None, None),
+    "Logistic regression, last 4 seasons": (_logit, 4, None),
+    "Logistic regression, last 4 seasons + this season's rates": (_logit, 4, DNF_FEATURES_WITH_SEASON_RATES),
+    "LightGBM classifier": (_lgbm_clf, None, None),
 }
 
 
 def dnf_walk_forward(df: pd.DataFrame, spec, seasons: list[int]) -> pd.Series:
-    make_model, window = spec
+    make_model, window, features = spec
+    features = features or DNF_FEATURES
     preds = []
     for season in seasons:
         first = FIRST_TRAIN_SEASON if window is None else max(FIRST_TRAIN_SEASON, season - window)
         train = df[(df["season"] >= first) & (df["season"] < season)]
         test = df[df["season"] == season]
-        model = make_model().fit(train[DNF_FEATURES], train["is_dnf"].astype(int))
-        preds.append(pd.Series(model.predict_proba(test[DNF_FEATURES])[:, 1], index=test.index))
+        model = make_model().fit(train[features], train["is_dnf"].astype(int))
+        preds.append(pd.Series(model.predict_proba(test[features])[:, 1], index=test.index))
     return pd.concat(preds)
 
 

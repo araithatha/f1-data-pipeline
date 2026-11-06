@@ -96,6 +96,9 @@ def group_importance(df, cand, params, feats, season: int, n_repeats: int = 5) -
     base = models.race_metrics(test.assign(score=predict(test)), "score")["spearman"]
     rows = []
     for group, cols in features.FEATURES.items():
+        cols = [c for c in cols if c in feats]
+        if not cols:
+            continue
         drops = []
         for _ in range(n_repeats):
             shuffled = test.copy()
@@ -114,7 +117,7 @@ def main() -> int:
 
     df = features.build_feature_table()
     df.to_csv(OUT / "feature_table.csv", index=False)
-    feats = features.ALL_FEATURES
+    feats = features.CORE_FEATURES
     log.info("feature table: %d driver-races, %d races, %d features", len(df), df["race_id"].nunique(), len(feats))
 
     # ---- Stage 2a: DNF model (needed to score whole systems) -----------------
@@ -146,6 +149,8 @@ def main() -> int:
     base_val = board.loc[0, "spearman"]
     ablation = []
     for group, cols in features.FEATURES.items():
+        if not set(cols) & set(feats):
+            continue
         kept = [f for f in feats if f not in cols]
         oof = models.walk_forward(df, best, params, kept, VALIDATION_SEASONS)
         ablation.append({"dropped_group": group, "spearman": models.race_metrics(oof, "score")["spearman"]})
@@ -153,13 +158,27 @@ def main() -> int:
     ablation.to_csv(OUT / "ablation_validation.csv", index=False)
 
     # ---- Stage 2b: fit race-day noise on validation for the final system -----
-    val_sim, sigma, wet_mult, noise_grid = system_on(oofs[best_name], p_dnf_val)
+    val = oofs[best_name]
+    val_sim, sigma, wet_mult, noise_grid = system_on(val, p_dnf_val)
     noise_grid.to_csv(OUT / "noise_fit_validation.csv", index=False)
     log.info("fitted noise: sigma=%.2f, wet multiplier=%.2f", sigma, wet_mult)
     # Comparison systems, fitted the same way on validation.
     p_base_val = chaos.dnf_walk_forward(df, base_spec, VALIDATION_SEASONS)
     _, g_sigma, g_wet, _ = system_on(oofs["Grid order (baseline)"], p_base_val)
-    _, n_sigma, n_wet, _ = system_on(oofs[best_name], p_dnf_val * 0)
+
+    # ---- Regulation changes: is the regulation-aware add-on worth adopting? --
+    # Decided on validation only, before the test seasons are scored.
+    reg_feats = feats + features.REGULATION_AWARE
+    reg_val = models.walk_forward(df, best, params, reg_feats, VALIDATION_SEASONS)
+    reg_val_sim, r_sigma, r_wet, _ = system_on(reg_val, p_dnf_val)
+    adopt = chaos.probabilistic_scores(reg_val_sim)["log_loss_mean"] < chaos.probabilistic_scores(val_sim)["log_loss_mean"]
+    log.info("regulation-aware add-on: %s", "ADOPTED (better on validation)" if adopt else "not adopted (no better on validation)")
+    core = dict(feats=feats, val=val, val_sim=val_sim, sigma=sigma, wet=wet_mult)
+    reg = dict(feats=reg_feats, val=reg_val, val_sim=reg_val_sim, sigma=r_sigma, wet=r_wet)
+    final, alt = (reg, core) if adopt else (core, reg)
+    feats, val, val_sim, sigma, wet_mult = final["feats"], final["val"], final["val_sim"], final["sigma"], final["wet"]
+    alt_feats, alt_sigma, alt_wet = alt["feats"], alt["sigma"], alt["wet"]
+    _, n_sigma, n_wet, _ = system_on(val, p_dnf_val * 0)
 
     # ---- Held-out test: 2025 and 2026 ----------------------------------------
     p_dnf_test = chaos.dnf_walk_forward(df, dnf_spec, TEST_SEASONS)
@@ -178,6 +197,55 @@ def main() -> int:
 
     no_fp = [f for f in feats if f not in features.FEATURES["practice"]]
     test_nofp = models.walk_forward(df, best, params, no_fp, TEST_SEASONS)
+
+    # Test-season predictions from the variant that was NOT adopted, for the before/after scorecard.
+    alt_test = models.walk_forward(df, best, params, alt_feats, TEST_SEASONS)
+    alt_test_sim, *_ = system_on(alt_test, p_dnf_test, alt_sigma, alt_wet)
+    rates_spec = chaos.DNF_CANDIDATES["Logistic regression, last 4 seasons + this season's rates"]
+    rates_p_val = chaos.dnf_walk_forward(df, rates_spec, VALIDATION_SEASONS)
+    rates_p_test = chaos.dnf_walk_forward(df, rates_spec, TEST_SEASONS)
+
+    def reset_card(core_scored, core_sim, reg_scored, reg_sim, rates_p, mask_season):
+        """Metrics on the first races after a rule reset vs the rest of that season."""
+        out = {}
+        for label, cond in [("first_5_races_after_reset", lambda d: d["races_into_era"] < 5),
+                            ("rest_of_season", lambda d: d["races_into_era"] >= 5)]:
+            sel = lambda d: d[(d["season"] == mask_season) & cond(d)]
+            out[label] = {
+                "races": int(sel(core_scored)["race_id"].nunique()),
+                "spearman_core": models.race_metrics(sel(core_scored), "score")["spearman"],
+                "spearman_with_regulation_features": models.race_metrics(sel(reg_scored), "score")["spearman"],
+                "spearman_grid": models.race_metrics(sel(core_scored).assign(score=lambda d: d["grid_adj"]), "score")["spearman"],
+                "system_log_loss_core": chaos.probabilistic_scores(sel(core_sim))["log_loss_mean"],
+                "system_log_loss_with_regulation_features": chaos.probabilistic_scores(sel(reg_sim))["log_loss_mean"],
+                "dnf_predicted_selected_model": float(sel(core_sim)["p_dnf"].mean()),
+                "dnf_predicted_with_season_rates": float(rates_p.loc[sel(core_sim).index].mean()),
+                "dnf_actual": float(sel(core_sim)["is_dnf"].mean()),
+            }
+        return out
+
+    core_val, core_val_sim = core["val"], core["val_sim"]
+    reg_val_sim_ = reg["val_sim"]
+    core_test, core_test_sim = (alt_test, alt_test_sim) if adopt else (test, test_sim)
+    reg_test, reg_test_sim = (test, test_sim) if adopt else (alt_test, alt_test_sim)
+    regulation = {
+        "adopted": bool(adopt),
+        "2022_validation": reset_card(core_val, core_val_sim, reg["val"], reg_val_sim_, rates_p_val, 2022),
+        "2026_test": reset_card(core_test, core_test_sim, reg_test, reg_test_sim, rates_p_test, 2026),
+        "overall_validation": {
+            "spearman_core": models.race_metrics(core_val, "score")["spearman"],
+            "spearman_with_regulation_features": models.race_metrics(reg["val"], "score")["spearman"],
+            "system_log_loss_core": chaos.probabilistic_scores(core_val_sim)["log_loss_mean"],
+            "system_log_loss_with_regulation_features": chaos.probabilistic_scores(reg_val_sim_)["log_loss_mean"],
+        },
+        "overall_test": {
+            "spearman_core": models.race_metrics(core_test, "score")["spearman"],
+            "spearman_with_regulation_features": models.race_metrics(reg_test, "score")["spearman"],
+            "system_log_loss_core": chaos.probabilistic_scores(core_test_sim)["log_loss_mean"],
+            "system_log_loss_with_regulation_features": chaos.probabilistic_scores(reg_test_sim)["log_loss_mean"],
+            "bootstrap_logloss_regulation_vs_core": bootstrap_diff(race_level_logloss(reg_test_sim), race_level_logloss(core_test_sim)),
+        },
+    }
 
     test_sim["official_order_score"] = test_sim["expected_position"]
     summary = {
@@ -220,6 +288,7 @@ def main() -> int:
             }
             for s, g in test_sim.groupby("season")
         },
+        "regulation_changes": regulation,
         "dnf_test": {
             "mean_predicted": float(test_sim["p_dnf"].mean()),
             "actual_rate": float(test_sim["is_dnf"].mean()),
@@ -244,7 +313,8 @@ def main() -> int:
     (OUT / "summary.json").write_text(json.dumps(summary, indent=2, default=float))
     log.info("done in %.0fs", summary["runtime_s"])
     print(json.dumps({k: summary[k] for k in ["selected_pace_model", "pace_model_params", "selected_dnf_model",
-                                               "validation_headline", "test_headline"]}, indent=2, default=float))
+                                               "validation_headline", "test_headline", "regulation_changes"]},
+                     indent=2, default=float))
     return 0
 
 

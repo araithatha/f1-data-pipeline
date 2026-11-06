@@ -8,6 +8,8 @@ Every feature uses only information available before lights out:
 * reliability: driver and team DNF rates in earlier races
 * circuit history from earlier editions: DNF rate and how much the grid order holds
 * race-day weather at the circuit
+* regulation changes: races since the last rule reset, team and circuit history that restarts
+  at each reset, last-era form faded in over the first races, and this season's retirement rates
 
 Rolling features are computed on races strictly before the current one
 (``shift(1)``), so a race never sees its own result. ``tests/test_features.py``
@@ -34,6 +36,7 @@ TEAM_LINEAGE = {
 
 # Seasons that started under major new technical regulations: past form is a weaker guide.
 NEW_REGULATION_SEASONS = {2014, 2017, 2022, 2026}
+FORM_FADE_IN_RACES = 5  # races after a reset before last-era form is trusted fully
 
 FINISHED_STATUSES = {"Finished", "Lapped"}
 NON_STARTERS = {"Did not start", "Withdrew", "Did not qualify", "Did not prequalify"}
@@ -144,6 +147,7 @@ def add_team_form(df: pd.DataFrame, t: dict[str, pd.DataFrame]) -> pd.DataFrame:
         _t_gain=("_gain", "mean"),
         _t_points=("points", "sum"),
         season=("season", "first"),
+        era=("era", "first"),
     )
 
     ps = t.get("fact_pit_stop")
@@ -162,6 +166,8 @@ def add_team_form(df: pd.DataFrame, t: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
     per_race = per_race.sort_values("race_order").reset_index(drop=True)
     per_race["team_avg_finish_pct_5"] = _rolling_prior(per_race, "team_id", "_t_finish_pct", 5)
+    # Same, but restarting at each regulation reset: under new rules, last era's car says little.
+    per_race["team_avg_finish_pct_5_era"] = _rolling_prior(per_race, ["team_id", "era"], "_t_finish_pct", 5)
     per_race["team_dnf_rate_10"] = _rolling_prior(per_race, "team_id", "_t_dnf", 10)
     per_race["team_avg_gain_10"] = _rolling_prior(per_race, "team_id", "_t_gain", 10)
     per_race["team_pit_speed_10"] = _rolling_prior(per_race, "team_id", "_t_pit_speed", 10)
@@ -169,7 +175,7 @@ def add_team_form(df: pd.DataFrame, t: dict[str, pd.DataFrame]) -> pd.DataFrame:
     per_race["team_season_points_before"] = per_race.groupby(["team_id", "season"])["_t_points"].cumsum() - per_race["_t_points"]
     per_race["team_champ_rank_before"] = per_race.groupby("race_id")["team_season_points_before"].rank(ascending=False, method="min")
 
-    keep = ["team_id", "race_id", "team_avg_finish_pct_5", "team_dnf_rate_10", "team_avg_gain_10",
+    keep = ["team_id", "race_id", "team_avg_finish_pct_5", "team_avg_finish_pct_5_era", "team_dnf_rate_10", "team_avg_gain_10",
             "team_pit_speed_10", "team_stops_rel_10", "team_season_points_before", "team_champ_rank_before"]
     return df.merge(per_race[keep], on=["team_id", "race_id"], how="left")
 
@@ -179,18 +185,51 @@ def add_circuit_history(df: pd.DataFrame) -> pd.DataFrame:
         g = g[~g["is_dnf"] & ~g["is_dsq"]]
         return g["grid_adj"].corr(g["finish_position"], method="spearman") if len(g) > 5 else np.nan
 
-    per_race = df.groupby(["circuit_id", "race_id", "race_order"]).apply(
+    per_race = df.groupby(["circuit_id", "era", "race_id", "race_order"]).apply(
         lambda g: pd.Series({"_c_dnf": g["_dnf"].mean(), "_c_grid_corr": grid_holds(g)}), include_groups=False
     ).reset_index().sort_values("race_order").reset_index(drop=True)
     per_race["circ_dnf_rate_hist"] = _rolling_prior(per_race, "circuit_id", "_c_dnf", None)
     per_race["circ_grid_corr_hist"] = _rolling_prior(per_race, "circuit_id", "_c_grid_corr", None)
     per_race["circ_editions_before"] = per_race.groupby("circuit_id").cumcount()
-    return df.merge(per_race[["race_id", "circ_dnf_rate_hist", "circ_grid_corr_hist", "circ_editions_before"]], on="race_id", how="left")
+    # Overtaking rules change between eras (ground effect from 2022, no DRS from 2026), so also track
+    # how well the grid order holds at this circuit within the current era only.
+    per_race["circ_grid_corr_era"] = _rolling_prior(per_race, ["circuit_id", "era"], "_c_grid_corr", None)
+    cols = ["race_id", "circ_dnf_rate_hist", "circ_grid_corr_hist", "circ_editions_before", "circ_grid_corr_era"]
+    return df.merge(per_race[cols], on="race_id", how="left")
 
 
 def add_context(df: pd.DataFrame) -> pd.DataFrame:
+    """Regulation eras: 2014-16, 2017-21, 2022-25, 2026-. Count races since the last reset."""
     df["new_regs_season"] = df["season"].isin(NEW_REGULATION_SEASONS)
     df["wx_wet_race"] = df["wx_wet_race"].fillna(False).astype(bool)
+    starts = sorted(NEW_REGULATION_SEASONS)
+    df["era"] = np.searchsorted(starts, df["season"].to_numpy(), side="right")
+    races = df.drop_duplicates("race_id")[["race_id", "race_order", "era"]].sort_values("race_order")
+    races["races_into_era"] = races.groupby("era").cumcount()
+    df = df.merge(races[["race_id", "races_into_era"]], on="race_id", how="left")
+    # 0 at the first race under new rules, rising to 1 after FORM_FADE_IN_RACES races.
+    df["era_form_weight"] = (df["races_into_era"] / FORM_FADE_IN_RACES).clip(upper=1.0)
+    return df
+
+
+def add_reliability_trend(df: pd.DataFrame) -> pd.DataFrame:
+    """Retirement rates so far this season, so a sudden change (e.g. new 2026 power units) shows up fast."""
+    race = df.groupby(["race_id", "race_order", "season"], as_index=False)["_dnf"].mean().sort_values("race_order")
+    race = race.reset_index(drop=True)
+    race["field_dnf_rate_season"] = _rolling_prior(race, "season", "_dnf", None)
+    df = df.merge(race[["race_id", "field_dnf_rate_season"]], on="race_id", how="left")
+    team = df.groupby(["team_id", "season", "race_id", "race_order"], as_index=False)["_dnf"].mean()
+    team = team.sort_values("race_order").reset_index(drop=True)
+    team["team_dnf_rate_season"] = _rolling_prior(team, ["team_id", "season"], "_dnf", None)
+    return df.merge(team[["team_id", "race_id", "team_dnf_rate_season"]], on=["team_id", "race_id"], how="left")
+
+
+def add_regulation_interactions(df: pd.DataFrame) -> pd.DataFrame:
+    """Let the model discount last-era form right after a reset and lean on this weekend's pace instead."""
+    stale = 1.0 - df["era_form_weight"]
+    df["team_form_x_stale"] = df["team_avg_finish_pct_5"] * stale
+    df["drv_form_x_stale"] = df["drv_avg_finish_pct_5"] * stale
+    df["quali_gap_x_stale"] = df["gap_to_pole_pct"] * stale
     return df
 
 
@@ -204,16 +243,23 @@ FEATURES = {
                     "drv_wet_gain_hist"],
     "team_form": ["team_avg_finish_pct_5", "team_season_points_before", "team_champ_rank_before"],
     "team_strategy": ["team_avg_gain_10", "team_pit_speed_10", "team_stops_rel_10"],
-    "reliability": ["drv_dnf_rate_20", "team_dnf_rate_10"],
+    "reliability": ["drv_dnf_rate_20", "team_dnf_rate_10", "team_dnf_rate_season", "field_dnf_rate_season"],
     "circuit": ["circ_dnf_rate_hist", "circ_grid_corr_hist", "circ_editions_before"],
     "weather": ["wx_air_temp_c", "wx_precip_mm", "wx_humidity_pct", "wx_wind_kph", "wx_wet_race"],
     "context": ["new_regs_season", "round"],
+    "regulation": ["races_into_era", "era_form_weight", "team_avg_finish_pct_5_era", "circ_grid_corr_era",
+                   "team_form_x_stale", "drv_form_x_stale", "quali_gap_x_stale"],
 }
 ALL_FEATURES = [f for group in FEATURES.values() for f in group]
 
+# Regulation-aware features are built and tested as a candidate add-on. run.py adopts them only if
+# they improve the validation seasons (on the current data they don't; see the project README).
+REGULATION_AWARE = FEATURES["regulation"] + ["team_dnf_rate_season", "field_dnf_rate_season"]
+CORE_FEATURES = [f for f in ALL_FEATURES if f not in REGULATION_AWARE]
+
 TARGETS = ["finish_position", "finisher_rank", "n_finishers", "n_starters", "is_dnf", "is_dsq",
            "is_win", "is_podium", "is_top10", "status"]
-IDS = ["race_id", "season", "round", "race_order", "race_name", "circuit_id", "driver_id", "constructor_id", "team_id"]
+IDS = ["race_id", "season", "round", "race_order", "race_name", "circuit_id", "driver_id", "constructor_id", "team_id", "era"]
 
 
 def build_feature_table(path: Path = PROCESSED) -> pd.DataFrame:
@@ -223,7 +269,9 @@ def build_feature_table(path: Path = PROCESSED) -> pd.DataFrame:
     df = add_weekend_features(df, t)
     df = add_driver_form(df)
     df = add_team_form(df, t)
+    df = add_reliability_trend(df)
     df = add_circuit_history(df)
+    df = add_regulation_interactions(df)
     for col in ALL_FEATURES:
         if df[col].dtype == bool:
             df[col] = df[col].astype(int)

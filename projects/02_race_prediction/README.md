@@ -68,7 +68,8 @@ excludes zero). And the probabilities are honest: when the model says 40%, it ha
 
 All features use only information available **before the race starts**. Rolling statistics only
 look at earlier races. A [leakage test](../../tests/test_features.py) rebuilds every feature with
-all future races deleted and checks that nothing changes. That test caught a real leak during
+all future races deleted (at five cut-off dates, including right after the 2022 and 2026 rule
+resets) and checks that nothing changes. That test caught a real leak during
 development: a "season progress" feature quietly used the number of races remaining. It was removed.
 
 | Group | Features | Source |
@@ -82,6 +83,7 @@ development: a "season progress" feature quietly used the number of races remain
 | Circuit history | DNF rate at this track, how strongly grid order holds here, editions held | Jolpica-F1 |
 | Weather | air temperature, rain, humidity, wind over the race window | Open-Meteo (ERA5) |
 | Context | new-regulation season (2014/2017/2022/2026), round | — |
+| *Rule-change add-on (tested, not adopted)* | *races since last reset, era-reset team and circuit history, form fade-in interactions, in-season retirement rates* | *derived* |
 
 Team history follows teams through rebrands (Toro Rosso → AlphaTauri → RB, Force India → Racing
 Point → Aston Martin, Sauber → Alfa Romeo → Audi, and so on).
@@ -132,13 +134,63 @@ beat LightGBM and a constant base rate.
 
 ---
 
+## Rule changes: tested and rejected
+
+F1 rewrites its technical rules every few years: hybrid engines in 2014, wider cars in 2017,
+ground-effect cars and the budget cap era from 2022, new power units and no DRS in 2026. The core
+model handles this implicitly. Form uses short windows (5–10 races), the model is retrained before
+every season, the retirement model learns only from the last four seasons, and a flag marks
+new-rules seasons.
+
+Breaking accuracy down by season showed where that falls short. **In the first five races after a
+reset, the model loses its edge over the grid**, because its form features still describe last
+year's cars:
+
+| Rank correlation with result | First 5 races after reset | Rest of season |
+|---|---|---|
+| 2022: model / grid | 0.782 / 0.778 | **0.835** / 0.734 |
+| 2026: model / grid | 0.845 / **0.856** | **0.844** / 0.791 |
+
+Reliability shifted too: retirements jumped from 11% of starts in 2025 to 19% in 2026 with the new power units.
+
+So I built and tested a **regulation-aware add-on**:
+- a counter of races since the last reset;
+- team form and circuit "does the grid hold here" history that restarts at each reset;
+- interaction terms that let the model fade old form in over the first five races and lean on qualifying instead;
+- this season's running retirement rate for each team and for the field.
+
+All of these passed the leakage test, including cut-offs placed right after the 2022 and 2026 resets.
+
+**Result: no improvement, so it wasn't adopted.** The evaluation script decides on validation seasons before touching the test seasons:
+
+| | Core model | With rule-change add-on |
+|---|---|---|
+| Validation log loss (lower is better) | **0.2534** | 0.2536 |
+| Validation rank correlation | **0.830** | 0.828 |
+| 2022, first 5 races (rank corr.) | **0.782** | 0.770 |
+| Test log loss (2025–26) | 0.2470 | 0.2466: no real difference (95% CI spans zero) |
+| Retirement rate, early 2026 (actual 16.5%) | 14.8% | **16.4%** |
+| Retirement rate, early 2022 (actual 19.2%) | **16.6%** | 23.7% |
+
+Why it doesn't help:
+- **There are only two resets to learn from.** The data starts in 2014, which leaves 2017 and 2022 before the test seasons, or about ten post-reset races. That's too few to learn how much to discount old form.
+- **There's little to gain anyway.** Right after a reset, qualifying already reveals the new pecking order. The best any model can do is match the grid, and the core model already does roughly that.
+- **The in-season retirement rate cuts both ways.** It caught 2026's reliability drop within a few races, but over-reacted to a rough start to 2022.
+
+The add-on stays in the code (`REGULATION_AWARE` in `features.py`) and is re-evaluated on every
+run, so it will be adopted automatically if more post-reset seasons ever make it pay off. Full
+numbers are in [`summary.json`](results/summary.json) under `regulation_changes`.
+
+---
+
 ## Limitations
 
 - **Picking the winner is hard to improve on.** In 2025–2026 the pole-sitter won 67% of races, and the model's favourite won 63%: two races apart in 43. That gap is well within noise (±7 points). In 2021–2024 the model's favourite did better than the pole-sitter (59% vs 51%). The model's advantage is in everything else: the rest of the order, the podium and honest probabilities.
 - **Weather is the observed race-day weather** (ERA5 reanalysis), standing in for a forecast. A live version would use a forecast, which is less certain. ERA5 agrees with the circuit's own rain sensor on 90% of races.
 - **Retirement causes aren't distinguishable after 2024.** The source now records most retirements as "Retired", so crashes and mechanical failures are modelled together.
 - **The test seasons were looked at once before the design was final.** A first run showed the model underrated pole position, which led to adding pole and front-row features and the log-rank target. Both were kept only because they improved the *validation* seasons.
-- **New regulations reset form.** 2026 is a new-rules season, so the first races lean on stale team form. Even so, accuracy in 2026 (rank corr. 0.844) was higher than in 2025 (0.797).
+- **New regulations reset form.** For about five races after a rule change, the model is no better than the grid order (see [Rule changes](#rule-changes-tested-and-rejected)). Across all of 2026 it still did better than in 2025 (rank corr. 0.844 vs 0.797).
+- **2026's reliability problems were under-predicted.** Retirements reached 20% of starts in the second part of 2026, against roughly 15% predicted. No version of the retirement model anticipated a jump that large.
 
 ---
 

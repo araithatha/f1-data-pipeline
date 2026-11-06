@@ -1,35 +1,26 @@
-# F1 Data Portfolio
+# F1 Data Pipeline
 
-An end-to-end Formula 1 analytics project. A Python pipeline pulls data from three public APIs,
-cleans it, models it as a star schema and publishes analysis-ready CSVs. The analysis projects
-(race-outcome prediction and tyre strategy) and the Tableau dashboards are all built on those CSVs.
+A Python ETL pipeline that pulls Formula 1 data from three public APIs, cleans and joins it, models
+it as a star schema and publishes analysis-ready CSVs, with 32 automated data-quality checks on
+every run. It is the data layer for an F1 analytics series.
 
 | | |
 |---|---|
 | **Coverage** | 271 Grands Prix (2014 to Nov 2026); lap-level timing and practice pace for 89 races (2023+) |
 | **Volume** | 98,590 laps, 5,523 race results, 5,502 qualifying results, 9,960 pit stops, 4,297 practice summaries |
 | **Sources** | [Jolpica-F1](https://github.com/jolpica/jolpica-f1) (Ergast successor) · [OpenF1](https://openf1.org) · [Open-Meteo](https://open-meteo.com) historical weather |
-| **Stack** | Python, pandas, scikit-learn, LightGBM, XGBoost, pytest; Tableau Public for dashboards |
+| **Stack** | Python, pandas, REST APIs, pytest |
 
-## Projects in this repo
+## Projects built on this data
 
-| # | Project | Focus | Status |
-|---|---|---|---|
-| 1 | [Data pipeline](#project-1-data-pipeline) | ETL, data modelling, data quality | ✅ Done |
-| 2 | [Race outcome prediction](projects/02_race_prediction/) | Feature engineering, model selection, Monte Carlo simulation | ✅ Done |
-| 3 | Tyre strategy & degradation | Statistical analysis, Tableau storytelling | 🔜 Next |
-
-### Project 2 at a glance
-
-Predicts win, podium and points chances for every driver before each race. A pace model is combined
-with a retirement-risk model and 10,000 race simulations, so crashes, breakdowns and rain are priced
-in rather than ignored. Seven models were compared with walk-forward validation. On the held-out
-2025–2026 seasons (43 races) its probabilities are **16% more accurate than the grid-order
-baseline**, and 73% of its podium picks were correct. [Full write-up →](projects/02_race_prediction/)
+| Project | What it does |
+|---|---|
+| **[f1-race-predictor](https://github.com/araithatha/f1-race-predictor)** | Predicts each driver's win, podium and points chances before every race, combining a pace model, a retirement-risk model and 10,000 race simulations. Its probabilities are 16% more accurate than the grid-order baseline on two held-out seasons. |
+| Tyre strategy & degradation | *Coming next:* tyre wear by compound and circuit, with a Tableau Public dashboard. |
 
 ---
 
-## Project 1: Data pipeline
+## How it works
 
 ```mermaid
 flowchart LR
@@ -39,7 +30,7 @@ flowchart LR
     C[Extract<br/>rate-limited, retried,<br/>cached raw JSON] --> D[Transform<br/>clean, join sources,<br/>derive metrics]
     D --> E[Validate<br/>32 data-quality checks]
     E --> F[(data/processed<br/>star schema CSVs)]
-    F --> G[Analysis notebooks]
+    F --> G[f1-race-predictor]
     F --> H[Tableau Public]
 ```
 
@@ -48,7 +39,7 @@ flowchart LR
 - **Extract.** Calls three REST APIs with rate limiting, exponential-backoff retries and pagination
   handling. Every response is cached as raw JSON, so runs are resumable and incremental: a re-run
   only downloads new races.
-- **Transform.** Joins the two sources, which use different identifiers. Races are matched on
+- **Transform.** Joins the sources, which use different identifiers. Races are matched on
   start time; drivers are matched through the race-specific car number. The step also standardises
   lap times, rebuilds each driver's tyre age lap by lap from stint data, attaches the nearest weather
   reading to every lap, and flags laps behind the safety car or in the pit lane so they can be
@@ -93,8 +84,7 @@ in pandas, SQL or Tableau.
 pip install -r requirements.txt
 PYTHONPATH=src python -m f1pipeline.run                 # results 2014+, lap timing 2023+
 PYTHONPATH=src python -m f1pipeline.run --refresh       # pick up races since the last run
-PYTHONPATH=src python -m f1model.run                    # Project 2: train, compare, evaluate
-PYTHONPATH=src python -m pytest                          # unit and leakage tests
+PYTHONPATH=src python -m pytest                          # unit tests
 ```
 
 A first full run makes about 1,350 API calls and takes about 35 minutes, because it stays inside the

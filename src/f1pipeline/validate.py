@@ -20,6 +20,8 @@ PRIMARY_KEYS = {
     "fact_result": ["race_id", "driver_id"],
     "fact_qualifying": ["race_id", "driver_id"],
     "fact_lap": ["race_id", "driver_number", "lap_number"],
+    "fact_pit_stop": ["race_id", "driver_id", "stop_number"],
+    "fact_practice": ["race_id", "driver_id", "session_name"],
 }
 
 # Facts anyone can look up, used as end-to-end sanity checks.
@@ -87,6 +89,21 @@ def run_checks(tables: dict[str, pd.DataFrame]) -> list[Check]:
         max_lap = laps.merge(eligible, on=["race_id", "driver_id"], how="inner")
         over = int((max_lap["lap_number"] > max_lap["laps_completed"] + 1).sum())
         checks.append(Check("lap numbers within laps completed", over == 0, f"{over} laps beyond the driver's race distance", hard=False))
+
+    dr = tables["dim_race"]
+    if "wx_wet_race" in dr:
+        cov = dr["wx_precip_mm"].notna().mean()
+        checks.append(Check("races with Open-Meteo weather", cov >= 0.98, f"{cov:.1%} covered", hard=False))
+        both = dr.dropna(subset=["wet_race", "wx_wet_race"]) if "wet_race" in dr else pd.DataFrame()
+        if not both.empty:
+            agree = (both["wet_race"].astype(bool) == both["wx_wet_race"].astype(bool)).mean()
+            checks.append(Check("Open-Meteo vs track rain sensor agree (2023+)", agree >= 0.85,
+                                f"{agree:.1%} of {len(both)} races agree", hard=False))
+
+    ps = tables.get("fact_pit_stop")
+    if ps is not None and not ps.empty:
+        races_with_stops = ps["race_id"].nunique() / dr["race_id"].nunique()
+        checks.append(Check("races with pit-stop data", races_with_stops >= 0.95, f"{races_with_stops:.1%} of races", hard=False))
 
     return checks
 

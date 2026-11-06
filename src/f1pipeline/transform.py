@@ -3,8 +3,10 @@
 Output is a small star schema saved as CSV:
 
     dim_race, dim_driver, dim_constructor          (dimensions)
-    fact_result, fact_qualifying                   (one row per driver per race, 2014+)
-    fact_lap, fact_pit_stop                        (lap-level, 2023+ from OpenF1)
+    fact_result, fact_qualifying, fact_pit_stop    (driver x race, 2014+, Jolpica)
+    fact_lap, fact_practice                        (lap-level and practice pace, 2023+, OpenF1)
+
+dim_race also carries race-window weather from Open-Meteo for every season.
 
 Every table uses the same keys: ``race_id`` ("2024_01"), ``driver_id`` and
 ``constructor_id`` (Jolpica's ids, e.g. "max_verstappen", "red_bull").
@@ -313,7 +315,7 @@ def build_openf1_tables(
         for col in ("stint_number", "tyre_age_laps", "tyre_age_at_stint_start",
                     "speed_trap_i1_kph", "speed_trap_i2_kph", "speed_trap_st_kph"):
             if col in fact_lap:
-                fact_lap[col] = fact_lap[col].round().astype("Int64")
+                fact_lap[col] = pd.to_numeric(fact_lap[col], errors="coerce").round().astype("Int64")
         fact_lap["date_start"] = fact_lap["date_start"].dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         lead = ["race_id", "driver_id", "driver_number", "lap_number"]
         fact_lap = fact_lap[lead + [c for c in fact_lap.columns if c not in lead]]
@@ -327,6 +329,109 @@ def build_openf1_tables(
 
 
 # --------------------------------------------------------------------------- #
+# Pit stops (Jolpica, 2014+), weather (Open-Meteo, 2014+), practice (OpenF1, 2023+)
+# --------------------------------------------------------------------------- #
+def build_fact_pit_stop(pitstops: list[dict]) -> pd.DataFrame:
+    rows = []
+    for race in pitstops:
+        rid = race_id(race["season"], race["round"])
+        for s in race["stops"]:
+            rows.append(
+                {
+                    "race_id": rid,
+                    "driver_id": s["driverId"],
+                    "stop_number": _to_int(s.get("stop")),
+                    "lap_number": _to_int(s.get("lap")),
+                    "pit_lane_time_s": parse_lap_time(s.get("duration")),
+                }
+            )
+    df = pd.DataFrame(rows, columns=["race_id", "driver_id", "stop_number", "lap_number", "pit_lane_time_s"])
+    # Pit-lane length differs by circuit, so compare each stop with that race's median stop.
+    # Stops more than 2x the median are red-flag or repair stops, not normal service.
+    median = df.groupby("race_id")["pit_lane_time_s"].transform("median")
+    df["pit_time_vs_race_median"] = df["pit_lane_time_s"] / median
+    df["is_normal_stop"] = df["pit_time_vs_race_median"].between(0.5, 2.0)
+    return df.sort_values(["race_id", "driver_id", "stop_number"]).reset_index(drop=True)
+
+
+WET_RACE_PRECIP_MM = 0.5  # total rain over the race window that counts as a wet race
+
+
+def build_race_weather(weather: list[dict]) -> pd.DataFrame:
+    """Summarise hourly weather over the ~2-hour race window (start hour to start + 2h)."""
+    rows = []
+    for w in weather:
+        hourly = w["data"].get("hourly") if isinstance(w["data"], dict) else None
+        if not hourly:
+            continue
+        hw = pd.DataFrame(hourly)
+        hw["time"] = pd.to_datetime(hw["time"], utc=True)
+        start = pd.Timestamp(w["start"].replace("Z", "+00:00")).floor("h")
+        window = hw[(hw["time"] >= start) & (hw["time"] <= start + pd.Timedelta(hours=2))]
+        if window.empty:
+            continue
+        precip = float(window["precipitation"].sum())
+        rows.append(
+            {
+                "race_id": race_id(w["season"], w["round"]),
+                "wx_air_temp_c": round(window["temperature_2m"].mean(), 1),
+                "wx_precip_mm": round(precip, 2),
+                "wx_humidity_pct": round(window["relative_humidity_2m"].mean(), 1),
+                "wx_wind_kph": round(window["wind_speed_10m"].mean(), 1),
+                "wx_wet_race": precip >= WET_RACE_PRECIP_MM,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_fact_practice(
+    practice: list[dict], meeting_to_race: dict[int, str], fact_result: pd.DataFrame
+) -> pd.DataFrame:
+    """One row per driver per practice session: best lap and long-run pace.
+
+    Long-run pace is the median of a driver's representative laps (within 107%
+    of their own best, not pit-out laps). It needs at least 5 such laps; teams
+    run race simulations on heavier fuel, so this reads closer to race pace than
+    a single fastest lap.
+    """
+    number_to_driver = fact_result.set_index(["race_id", "car_number"])["driver_id"].to_dict()
+    rows = []
+    for p in practice:
+        s = p["session"]
+        rid = meeting_to_race.get(s["meeting_key"])
+        laps = pd.DataFrame(p["laps"])
+        if rid is None or laps.empty or "lap_duration" not in laps:
+            continue
+        laps = laps.dropna(subset=["lap_duration"])
+        if "is_pit_out_lap" in laps:
+            laps = laps[~laps["is_pit_out_lap"].fillna(False).astype(bool)]
+        for number, g in laps.groupby("driver_number"):
+            best = g["lap_duration"].min()
+            rep = g[g["lap_duration"] <= best * 1.07]["lap_duration"]
+            rows.append(
+                {
+                    "race_id": rid,
+                    "driver_id": number_to_driver.get((rid, number)),
+                    "driver_number": number,
+                    "session_name": s["session_name"],
+                    "laps_completed": len(g),
+                    "best_lap_s": best,
+                    "longrun_median_s": rep.median() if len(rep) >= 5 else np.nan,
+                }
+            )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    # Stand-in drivers who ran only in practice don't map to a race entry; drop them.
+    df = df.dropna(subset=["driver_id"])
+    grp = df.groupby(["race_id", "session_name"])
+    df["best_lap_gap_pct"] = (df["best_lap_s"] / grp["best_lap_s"].transform("min") - 1) * 100
+    df["longrun_gap_pct"] = (df["longrun_median_s"] / grp["longrun_median_s"].transform("min") - 1) * 100
+    df["best_lap_rank"] = grp["best_lap_s"].rank(method="min")
+    return df.sort_values(["race_id", "session_name", "best_lap_rank"]).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
 def transform_all(raw: dict[str, Any]) -> dict[str, pd.DataFrame]:
@@ -334,12 +439,25 @@ def transform_all(raw: dict[str, Any]) -> dict[str, pd.DataFrame]:
     dim_driver, dim_constructor = build_dims_from_results(raw["results"])
     fact_result = build_fact_result(raw["results"])
     fact_qualifying = build_fact_qualifying(raw["qualifying"])
-    fact_lap, fact_pit_stop, race_weather = build_openf1_tables(raw["openf1"], dim_race, fact_result)
+    # OpenF1 pit data only covers 2023+, so pit stops come from Jolpica (2014+) instead.
+    fact_lap, _openf1_pits, race_weather = build_openf1_tables(raw["openf1"], dim_race, fact_result)
+    fact_pit_stop = build_fact_pit_stop(raw["pitstops"])
 
-    # Only keep races that have actually been run, then attach race-level weather.
+    meeting_to_race = {}
+    for b in raw["openf1"]:
+        rid = _match_race_id(b["session"], dim_race)
+        if rid:
+            meeting_to_race[b["session"]["meeting_key"]] = rid
+    fact_practice = build_fact_practice(raw["practice"], meeting_to_race, fact_result)
+
+    # Only keep races that have actually been run, then attach race-level weather:
+    # OpenF1 track sensors (2023+) and Open-Meteo reanalysis (all seasons).
     dim_race = dim_race[dim_race["race_id"].isin(fact_result["race_id"])]
     if not race_weather.empty:
         dim_race = dim_race.merge(race_weather, on="race_id", how="left")
+    wx = build_race_weather(raw["weather"])
+    if not wx.empty:
+        dim_race = dim_race.merge(wx, on="race_id", how="left")
     dim_race["race_start_utc"] = dim_race["race_start_utc"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     return {
@@ -350,4 +468,5 @@ def transform_all(raw: dict[str, Any]) -> dict[str, pd.DataFrame]:
         "fact_qualifying": fact_qualifying,
         "fact_lap": fact_lap,
         "fact_pit_stop": fact_pit_stop,
+        "fact_practice": fact_practice,
     }

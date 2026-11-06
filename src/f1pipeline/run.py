@@ -26,6 +26,7 @@ PROCESSED = ROOT / "data" / "processed"
 
 JOLPICA_URL = "https://api.jolpi.ca/ergast/f1"
 OPENF1_URL = "https://api.openf1.org/v1"
+OPENMETEO_URL = "https://archive-api.open-meteo.com/v1"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
 
     jolpica = CachedClient(JOLPICA_URL, RAW / "jolpica", min_interval_s=1.0)
     openf1 = CachedClient(OPENF1_URL, RAW / "openf1", min_interval_s=2.1)
+    openmeteo = CachedClient(OPENMETEO_URL, RAW / "openmeteo", min_interval_s=0.5)
 
     if args.refresh:
         # Only the current season changes; clear its cached index files so new races are picked up.
@@ -52,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     history = list(range(args.history_from, args.to + 1))
     timing = list(range(max(args.timing_from, 2023), args.to + 1))
 
-    raw = extract.extract_all(jolpica, openf1, history, timing)
+    raw = extract.extract_all(jolpica, openf1, openmeteo, history, timing)
     tables = transform.transform_all(raw)
 
     PROCESSED.mkdir(parents=True, exist_ok=True)
@@ -67,8 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         "history_seasons": [history[0], history[-1]],
         "timing_seasons": [timing[0], timing[-1]] if timing else [],
         "row_counts": {k: len(v) for k, v in tables.items()},
-        "api_calls": {"jolpica": jolpica.calls_made, "openf1": openf1.calls_made},
-        "cache_hits": {"jolpica": jolpica.cache_hits, "openf1": openf1.cache_hits},
+        "api_calls": {"jolpica": jolpica.calls_made, "openf1": openf1.calls_made, "openmeteo": openmeteo.calls_made},
+        "cache_hits": {"jolpica": jolpica.cache_hits, "openf1": openf1.cache_hits, "openmeteo": openmeteo.cache_hits},
         "runtime_s": round(time.monotonic() - started, 1),
     }
     (PROCESSED / "_manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -80,7 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%d hard data-quality checks failed", len(failed))
         return 1
     log.info("done in %.0fs (%d API calls, %d cache hits)", manifest["runtime_s"],
-             jolpica.calls_made + openf1.calls_made, jolpica.cache_hits + openf1.cache_hits)
+             jolpica.calls_made + openf1.calls_made + openmeteo.calls_made,
+             jolpica.cache_hits + openf1.cache_hits + openmeteo.cache_hits)
     return 0
 
 

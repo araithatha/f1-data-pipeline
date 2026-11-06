@@ -28,7 +28,7 @@ class CachedClient:
         base_url: str,
         cache_dir: Path,
         min_interval_s: float = 1.0,
-        max_retries: int = 5,
+        max_retries: int = 8,
         timeout_s: float = 30.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")

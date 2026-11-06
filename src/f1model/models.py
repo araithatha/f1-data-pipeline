@@ -134,6 +134,8 @@ def fit_predict(cand: Candidate, params: dict, train: pd.DataFrame, test: pd.Dat
         return test["grid_adj"].to_numpy(dtype=float)
 
     tr = train.dropna(subset=["finisher_rank"]).sort_values(["race_order", "finisher_rank"])
+    # A feature with no data in the training seasons (e.g. practice pace before 2023) can't be learned.
+    features = [f for f in features if tr[f].notna().any()]
     model = cand.build(**params)
     if cand.ranker:
         # Relevance label: higher is better, so invert the finishing rank within each race.

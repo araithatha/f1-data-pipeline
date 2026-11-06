@@ -56,22 +56,33 @@ class BaseRate:
         return np.column_stack([np.full(len(X), 1 - self.p), np.full(len(X), self.p)])
 
 
+def _logit():
+    return make_pipeline(SimpleImputer(strategy="median", add_indicator=True), StandardScaler(),
+                         LogisticRegression(C=0.3, max_iter=2000))
+
+
+def _lgbm_clf():
+    return lgb.LGBMClassifier(num_leaves=7, n_estimators=200, learning_rate=0.03, min_child_samples=50, subsample=0.8,
+                              subsample_freq=1, colsample_bytree=0.8, random_state=SEED, verbose=-1)
+
+
+# (model factory, training window in seasons; None = all earlier seasons).
+# Cars have become far more reliable since the mid-2010s, so a recent window may track today's rates better.
 DNF_CANDIDATES = {
-    "Base rate (baseline)": lambda: BaseRate(),
-    "Logistic regression": lambda: make_pipeline(
-        SimpleImputer(strategy="median", add_indicator=True), StandardScaler(), LogisticRegression(C=0.3, max_iter=2000)
-    ),
-    "LightGBM classifier": lambda: lgb.LGBMClassifier(
-        num_leaves=7, n_estimators=200, learning_rate=0.03, min_child_samples=50, subsample=0.8, subsample_freq=1,
-        colsample_bytree=0.8, random_state=SEED, verbose=-1
-    ),
+    "Base rate (baseline)": (BaseRate, None),
+    "Base rate, last 3 seasons": (BaseRate, 3),
+    "Logistic regression": (_logit, None),
+    "Logistic regression, last 4 seasons": (_logit, 4),
+    "LightGBM classifier": (_lgbm_clf, None),
 }
 
 
-def dnf_walk_forward(df: pd.DataFrame, make_model, seasons: list[int]) -> pd.Series:
+def dnf_walk_forward(df: pd.DataFrame, spec, seasons: list[int]) -> pd.Series:
+    make_model, window = spec
     preds = []
     for season in seasons:
-        train = df[(df["season"] >= FIRST_TRAIN_SEASON) & (df["season"] < season)]
+        first = FIRST_TRAIN_SEASON if window is None else max(FIRST_TRAIN_SEASON, season - window)
+        train = df[(df["season"] >= first) & (df["season"] < season)]
         test = df[df["season"] == season]
         model = make_model().fit(train[DNF_FEATURES], train["is_dnf"].astype(int))
         preds.append(pd.Series(model.predict_proba(test[DNF_FEATURES])[:, 1], index=test.index))
@@ -80,8 +91,8 @@ def dnf_walk_forward(df: pd.DataFrame, make_model, seasons: list[int]) -> pd.Ser
 
 def compare_dnf_models(df: pd.DataFrame, seasons: list[int]) -> tuple[pd.DataFrame, str]:
     rows = []
-    for name, make in DNF_CANDIDATES.items():
-        p = dnf_walk_forward(df, make, seasons)
+    for name, spec in DNF_CANDIDATES.items():
+        p = dnf_walk_forward(df, spec, seasons)
         y = df.loc[p.index, "is_dnf"].astype(int)
         rows.append({"model": name, "log_loss": log_loss(y, p.clip(EPS, 1 - EPS)), "brier": brier_score_loss(y, p),
                      "mean_predicted": p.mean(), "actual_rate": y.mean()})

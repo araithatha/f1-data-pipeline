@@ -1,23 +1,31 @@
 # F1 Data Portfolio
 
-An end-to-end Formula 1 analytics project. A Python pipeline pulls data from two public F1 APIs,
+An end-to-end Formula 1 analytics project. A Python pipeline pulls data from three public APIs,
 cleans it, models it as a star schema and publishes analysis-ready CSVs. The analysis projects
 (race-outcome prediction and tyre strategy) and the Tableau dashboards are all built on those CSVs.
 
 | | |
 |---|---|
-| **Coverage** | 270 Grands Prix (2014 to Oct 2026); lap-level timing for 88 races (2023+) |
-| **Volume** | 97,230 laps, 5,501 race results, 5,480 qualifying results, 3,064 pit stops |
-| **Sources** | [Jolpica-F1](https://github.com/jolpica/jolpica-f1) (Ergast successor) · [OpenF1](https://openf1.org) |
-| **Stack** | Python, pandas, REST APIs, pytest; Tableau Public for dashboards |
+| **Coverage** | 271 Grands Prix (2014 to Nov 2026); lap-level timing and practice pace for 89 races (2023+) |
+| **Volume** | 98,590 laps, 5,523 race results, 5,502 qualifying results, 9,960 pit stops, 4,297 practice summaries |
+| **Sources** | [Jolpica-F1](https://github.com/jolpica/jolpica-f1) (Ergast successor) · [OpenF1](https://openf1.org) · [Open-Meteo](https://open-meteo.com) historical weather |
+| **Stack** | Python, pandas, scikit-learn, LightGBM, XGBoost, pytest; Tableau Public for dashboards |
 
 ## Projects in this repo
 
 | # | Project | Focus | Status |
 |---|---|---|---|
 | 1 | [Data pipeline](#project-1-data-pipeline) | ETL, data modelling, data quality | ✅ Done |
-| 2 | Race outcome prediction | Classification modelling, feature engineering | 🔜 Next |
-| 3 | Tyre strategy & degradation | Statistical analysis, Tableau storytelling | 🔜 Planned |
+| 2 | [Race outcome prediction](projects/02_race_prediction/) | Feature engineering, model selection, Monte Carlo simulation | ✅ Done |
+| 3 | Tyre strategy & degradation | Statistical analysis, Tableau storytelling | 🔜 Next |
+
+### Project 2 at a glance
+
+Predicts win, podium and points chances for every driver before each race. A pace model is combined
+with a retirement-risk model and 10,000 race simulations, so crashes, breakdowns and rain are priced
+in rather than ignored. Seven models were compared with walk-forward validation. On the held-out
+2025–2026 seasons (43 races) its probabilities are **16% more accurate than the grid-order
+baseline**, and 73% of its podium picks were correct. [Full write-up →](projects/02_race_prediction/)
 
 ---
 
@@ -25,10 +33,11 @@ cleans it, models it as a star schema and publishes analysis-ready CSVs. The ana
 
 ```mermaid
 flowchart LR
-    A[Jolpica-F1 API<br/>schedule, results, qualifying] --> C
-    B[OpenF1 API<br/>laps, stints, pit stops, weather] --> C
+    A[Jolpica-F1 API<br/>schedule, results,<br/>qualifying, pit stops] --> C
+    B[OpenF1 API<br/>laps, stints, practice,<br/>track weather] --> C
+    W[Open-Meteo archive<br/>race-day weather] --> C
     C[Extract<br/>rate-limited, retried,<br/>cached raw JSON] --> D[Transform<br/>clean, join sources,<br/>derive metrics]
-    D --> E[Validate<br/>25 data-quality checks]
+    D --> E[Validate<br/>32 data-quality checks]
     E --> F[(data/processed<br/>star schema CSVs)]
     F --> G[Analysis notebooks]
     F --> H[Tableau Public]
@@ -36,7 +45,7 @@ flowchart LR
 
 **What it does**
 
-- **Extract.** Calls two REST APIs with rate limiting, exponential-backoff retries and pagination
+- **Extract.** Calls three REST APIs with rate limiting, exponential-backoff retries and pagination
   handling. Every response is cached as raw JSON, so runs are resumable and incremental: a re-run
   only downloads new races.
 - **Transform.** Joins the two sources, which use different identifiers. Races are matched on
@@ -57,6 +66,7 @@ erDiagram
     dim_race ||--o{ fact_qualifying : race_id
     dim_race ||--o{ fact_lap : race_id
     dim_race ||--o{ fact_pit_stop : race_id
+    dim_race ||--o{ fact_practice : race_id
     dim_driver ||--o{ fact_result : driver_id
     dim_driver ||--o{ fact_qualifying : driver_id
     dim_driver ||--o{ fact_lap : driver_id
@@ -65,13 +75,14 @@ erDiagram
 
 | Table | Grain | Key columns |
 |---|---|---|
-| `dim_race` | one row per Grand Prix | season, round, circuit, location, race-day weather (2023+) |
+| `dim_race` | one row per Grand Prix | season, round, circuit, location; race-window weather from Open-Meteo (all seasons) and track sensors (2023+) |
 | `dim_driver` | one row per driver | code, name, nationality, date of birth |
 | `dim_constructor` | one row per team | name, nationality |
 | `fact_result` | driver × race | grid, finish position, points, status, positions gained |
 | `fact_qualifying` | driver × race | Q1/Q2/Q3 times, best time, gap to pole % |
 | `fact_lap` | driver × race × lap | lap & sector times, speed traps, compound, tyre age, weather, `is_clean_lap` |
-| `fact_pit_stop` | driver × race × stop | lap, pit-lane time, stationary time |
+| `fact_pit_stop` | driver × race × stop (2014+) | lap, pit-lane time, time vs race median, normal-stop flag |
+| `fact_practice` | driver × race × session (2023+) | best lap, long-run pace, gaps to fastest %, laps completed |
 
 All tables share `race_id` (e.g. `2024_01`), `driver_id` and `constructor_id`, so they join directly
 in pandas, SQL or Tableau.
@@ -82,10 +93,11 @@ in pandas, SQL or Tableau.
 pip install -r requirements.txt
 PYTHONPATH=src python -m f1pipeline.run                 # results 2014+, lap timing 2023+
 PYTHONPATH=src python -m f1pipeline.run --refresh       # pick up races since the last run
-PYTHONPATH=src python -m pytest                          # unit tests
+PYTHONPATH=src python -m f1model.run                    # Project 2: train, compare, evaluate
+PYTHONPATH=src python -m pytest                          # unit and leakage tests
 ```
 
-A first full run makes about 600 API calls and takes about 20 minutes, because it stays inside the
+A first full run makes about 1,350 API calls and takes about 35 minutes, because it stays inside the
 free APIs' rate limits. Later runs read from the cache and finish in seconds.
 
 ### Design notes

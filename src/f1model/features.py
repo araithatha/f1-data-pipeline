@@ -85,6 +85,10 @@ def add_weekend_features(df: pd.DataFrame, t: dict[str, pd.DataFrame]) -> pd.Dat
     df = df.merge(q, on=["race_id", "driver_id"], how="left")
     df["pit_lane_start"] = df["grid"] == 0
     df["grid_pct"] = (df["grid_adj"] - 1) / (df["n_starters"] - 1)
+    # Track position is worth far more at the front: pole vs P2 matters more than P12 vs P13.
+    df["grid_log"] = np.log(df["grid_adj"])
+    df["is_pole"] = df["grid_adj"] == 1
+    df["is_front_row"] = df["grid_adj"] <= 2
 
     # Qualifying gap to the team-mate: the cleanest read of driver vs car.
     team_gap = df.groupby(["race_id", "constructor_id"])["gap_to_pole_pct"]
@@ -192,7 +196,7 @@ def add_context(df: pd.DataFrame) -> pd.DataFrame:
 
 # Feature groups (used by the models and for ablation studies).
 FEATURES = {
-    "weekend": ["grid_adj", "grid_pct", "pit_lane_start", "quali_position", "gap_to_pole_pct",
+    "weekend": ["grid_adj", "grid_pct", "grid_log", "is_pole", "is_front_row", "pit_lane_start", "quali_position", "gap_to_pole_pct",
                 "quali_gap_to_teammate_pct", "reached_q3"],
     "practice": ["fp_best_gap_pct", "fp_longrun_gap_pct", "fp_laps"],
     "driver_form": ["drv_avg_finish_pct_5", "drv_avg_points_5", "drv_avg_gain_10", "drv_starts",

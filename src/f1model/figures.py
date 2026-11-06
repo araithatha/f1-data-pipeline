@@ -49,12 +49,16 @@ def _hbar(ax, labels, values, highlight=None, fmt="{:.3f}"):
 
 def model_comparison(summary: dict):
     val = pd.read_csv(RESULTS / "model_comparison_validation.csv")
-    fig, ax = plt.subplots(figsize=(8, 4))
-    _hbar(ax, val["model"], val["spearman"], highlight=summary["selected_pace_model"])
-    ax.set_xlim(0, max(val["spearman"]) * 1.15)
-    ax.set_xlabel("Rank correlation with actual finishing order (higher is better)")
-    ax.set_title("Pace model comparison: walk-forward validation, 2021–2024")
-    fig.text(0.01, 0.01, "Each season predicted by a model trained only on earlier seasons. Selected model in blue.",
+    grid_ll = val.loc[val["model"] == "Grid order (baseline)", "system_log_loss"].iloc[0]
+    val = val[val["model"] != "Grid order (baseline)"].copy()
+    val["gain_pct"] = (grid_ll - val["system_log_loss"]) / grid_ll * 100
+    val = val.sort_values("gain_pct", ascending=False)
+    fig, ax = plt.subplots(figsize=(8, 3.8))
+    _hbar(ax, val["model"], val["gain_pct"], highlight=summary["selected_pace_model"], fmt="{:.1f}%")
+    ax.set_xlim(0, val["gain_pct"].max() * 1.18)
+    ax.set_xlabel("Improvement in probability accuracy over the grid-order baseline (log loss, %)")
+    ax.set_title("Seven models compared on 2021–2024 (walk-forward validation)")
+    fig.text(0.01, 0.01, "Each season is predicted by a model trained only on earlier seasons. Selected model in blue.",
              fontsize=8, color=INK_2)
     fig.tight_layout(rect=(0, 0.04, 1, 1))
     fig.savefig(FIGS / "model_comparison.png", dpi=160)
@@ -73,8 +77,10 @@ def feature_importance():
     fig, ax = plt.subplots(figsize=(8, 4))
     _hbar(ax, imp["label"], imp["spearman_drop"].clip(lower=0), fmt="{:.3f}")
     ax.set_xlabel("Drop in rank correlation when the group is scrambled (2025 season)")
-    ax.set_title("What drives the prediction")
-    fig.tight_layout()
+    ax.set_title("What drives the pace prediction")
+    fig.text(0.01, 0.01, "Weather and circuit history act through the race simulation and DNF model, not the pace order.",
+             fontsize=8, color=INK_2)
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
     fig.savefig(FIGS / "feature_importance.png", dpi=160)
     plt.close(fig)
 
@@ -123,8 +129,10 @@ def race_example(race_id: str | None = None):
     ax.set_axisbelow(True)
     ax.tick_params(axis="y", length=0)
     ax.set_xlabel("Chance of a podium finish (%)")
-    ax.set_title(f"{r['race_name'].iloc[0]} {r['season'].iloc[0]}: predicted before the race vs what happened")
-    fig.tight_layout()
+    ax.set_title(f"{r['race_name'].iloc[0]} {r['season'].iloc[0]}")
+    fig.text(0.01, 0.01, "Probabilities made before the race from 10,000 simulations; result shown after each bar.",
+             fontsize=8, color=INK_2)
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
     fig.savefig(FIGS / "race_example.png", dpi=160)
     plt.close(fig)
 
